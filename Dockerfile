@@ -5,8 +5,9 @@ COPY . /app
 
 RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install chromium
+RUN playwright install-deps chromium
 
-# Koyeb wuxuu u baahan yahay inuu arko Port furan
-EXPOSE 8080
+# Koyeb Port
+EXPOSE 8000
 
 CMD ["python", "main.py"]
