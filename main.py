@@ -1,5 +1,6 @@
 import os
 import asyncio
+import requests
 import json
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -15,7 +16,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"OK.ru Remote Uploader is Running")
+        self.wfile.write(b"OK.ru Direct Uploader is Running")
 
 def run_health_server():
     server = HTTPServer(('0.0.0.0', 8000), HealthCheckHandler)
@@ -29,7 +30,7 @@ def fix_cookies(cookies_list):
                 cookie['sameSite'] = "None"
     return cookies_list
 
-async def remote_upload_ok(update, video_url):
+async def upload_to_ok(update, video_path):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
@@ -43,30 +44,39 @@ async def remote_upload_ok(update, video_url):
         page = await context.new_page()
 
         try:
-            print("Gelaya OK.ru Video Manager...")
-            await page.goto("https://ok.ru/video/manager", wait_until="domcontentloaded", timeout=60000)
+            # 1. TAG HOME PAGE HORTA (Warm-up)
+            print("Tagaya Home Page...")
+            await page.goto("https://ok.ru/", wait_until="load")
             await asyncio.sleep(5)
 
-            # 1. Guji batoonka "Add a video using the link"
-            print("Guji 'Add video via link'...")
-            await page.click('button:has-text("Add a video using the link")')
+            # 2. TOOS U TAG BOGGA VIDEO-GA (Manager)
+            print("Tagaya Video Manager...")
+            await page.goto("https://ok.ru/video/manager", wait_until="load")
+            await asyncio.sleep(5)
+
+            # 3. GUJI BATOONKA "Add" (Batoonka liinta ah ee dhanka midig)
+            print("Raadinaya batoonka Add Video...")
+            await page.click('button:has-text("Add")')
             await asyncio.sleep(2)
 
-            # 2. Geli URL-ka muqaalka
-            print("Gelinaya URL-ka...")
-            await page.fill('input[placeholder="Paste the link to the video"]', video_url)
-            await asyncio.sleep(2)
-
-            # 3. Guji batoonka Add (Batoonka liinta ah)
-            await page.click('input[value="Add"]')
-            print("Muqaalka waa lagu daray OK.ru!")
+            # 4. DOORO "Upload video" (Kani waa kan muqaalka tooska ah looga soo dooranayo computer-ka)
+            # Mararka qaarkood batoonkani wuxuu ka muuqdaa isla markaaba
+            print("Gelinaya muqaalka...")
+            async with page.expect_file_chooser() as fc_info:
+                # Waxaan raadinaynaa batoonka 'Choose a file for upload'
+                await page.click('div.it_i.upload-video_it')
             
-            await asyncio.sleep(5)
+            file_chooser = await fc_info.value
+            await file_chooser.set_files(video_path)
+            
+            print("Faylka waa la gelinayaa, fadlan sug...")
+            # Sug inta upload-ku ka dhammanayo (Waqti sii)
+            await asyncio.sleep(60) 
             return True
 
         except Exception as e:
-            await page.screenshot(path="error.png")
-            await update.message.reply_photo(photo=open("error.png", 'rb'), caption=f"❌ Khalad: {e}")
+            await page.screenshot(path="final_error.png")
+            await update.message.reply_photo(photo=open("final_error.png", 'rb'), caption=f"❌ Upload Failed: {e}")
             return False
         finally:
             await browser.close()
@@ -75,13 +85,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     if not url.startswith("http"): return
 
-    msg = await update.message.reply_text("🚀 OK.ru ayaa loo dirayaa Link-ga si ay u upload-gareeyaan...")
+    msg = await update.message.reply_text("⏳ Server-ka ayaa soo dejinaya muqaalka (hf.space link)...")
+    file_path = f"video_{update.message.message_id}.mp4"
     
-    success = await remote_upload_ok(update, url)
-    if success:
-        await msg.edit_text("✅ Guul! OK.ru ayaa hadda soo dejisanaysa muqaalkaaga. Waxaad ka heli doontaa qaybta 'My Videos'.")
-    else:
-        await msg.edit_text("❌ Upload-ku wuu fashilmay. Eeg sawirka kore.")
+    try:
+        r = requests.get(url, stream=True)
+        with open(file_path, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=1024*1024):
+                f.write(chunk)
+        
+        await msg.edit_text("🚀 Soo dejintii waa dhammaatay. Hadda ayaa loo upload-gareynayaa OK.ru...")
+        success = await upload_to_ok(update, file_path)
+        if success:
+            await msg.edit_text("✅ Guul! Muqaalkii waa la upload gareeyay. Ka hubi 'My Videos' ee OK.ru-gaaga.")
+    except Exception as e:
+        await msg.edit_text(f"❌ Qalad: {str(e)}")
+    finally:
+        if os.path.exists(file_path): os.remove(file_path)
 
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
