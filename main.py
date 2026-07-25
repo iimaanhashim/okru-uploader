@@ -10,9 +10,39 @@ from playwright.async_api import async_playwright
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
+# ----------------------------------------------------------------------
 # SETTINGS
+# ----------------------------------------------------------------------
 OK_COOKIES_JSON = os.getenv("OK_COOKIES")
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+# Large files (700MB-1GB+) can take a long time for OK.ru to process
+# after the upload itself finishes. Default: 45 minutes. Override by
+# setting the UPLOAD_MAX_WAIT_SECONDS environment variable if needed.
+UPLOAD_MAX_WAIT_SECONDS = int(os.getenv("UPLOAD_MAX_WAIT_SECONDS", "2700"))
+
+# --- Large-file Telegram downloads (bypasses the 20MB Bot API limit) ---
+# Get API_ID / API_HASH from https://my.telegram.org (log in with the
+# SAME phone number/account that will be sending videos to the bot).
+# SESSION_STRING is generated once - see generate_session.py further
+# down in the chat instructions.
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
+TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING")
+
+LARGE_FILE_MODE = bool(TELEGRAM_API_ID and TELEGRAM_API_HASH and TELEGRAM_SESSION_STRING)
+
+pyro_client = None
+if LARGE_FILE_MODE:
+    from pyrogram import Client as PyroClient
+    pyro_client = PyroClient(
+        "large_file_downloader",
+        api_id=int(TELEGRAM_API_ID),
+        api_hash=TELEGRAM_API_HASH,
+        session_string=TELEGRAM_SESSION_STRING,
+        in_memory=True,
+    )
+
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -20,9 +50,11 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK.ru Universal Bot is Running")
 
+
 def run_health_server():
     server = HTTPServer(('0.0.0.0', 8000), HealthCheckHandler)
     server.serve_forever()
+
 
 def fix_cookies(cookies_list):
     valid_samesite = ["Strict", "Lax", "None"]
@@ -50,7 +82,6 @@ async def download_with_progress(url, file_path, msg):
         r = requests.get(url, stream=True, timeout=60)
         total = int(r.headers.get("content-length", 0))
         downloaded = 0
-        last_percent_reported = -1
         with open(file_path, "wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 1024):
                 if not chunk:
@@ -67,7 +98,6 @@ async def download_with_progress(url, file_path, msg):
     last_reported = -1
     last_update_time = 0
 
-    # Run the blocking requests download in a thread, but poll it via a queue
     gen = _download()
 
     def next_chunk():
@@ -100,10 +130,37 @@ async def download_with_progress(url, file_path, msg):
     await safe_edit(msg, "✅ Soo dejinta way dhammaatay. Diyaar u ah upload-ka OK.ru...")
 
 
+async def download_telegram_file_with_progress(chat_id, message_id, file_path, msg):
+    """
+    Download a large Telegram video/document using the Pyrogram user
+    session (bypasses the 20MB Bot API download limit; supports up to
+    2GB, or 4GB with Telegram Premium).
+    """
+    last_update_time = 0
+
+    async def progress(current, total):
+        nonlocal last_update_time
+        now = time.time()
+        if now - last_update_time >= 3:
+            last_update_time = now
+            percent = int(current * 100 / total) if total else 0
+            mb_done = current / (1024 * 1024)
+            mb_total = total / (1024 * 1024)
+            await safe_edit(
+                msg,
+                f"⏳ Soo dejinta muqaalka (Telegram): {percent}%\n"
+                f"({mb_done:.1f}MB / {mb_total:.1f}MB)"
+            )
+
+    tg_message = await pyro_client.get_messages(chat_id, message_ids=message_id)
+    await pyro_client.download_media(tg_message, file_name=file_path, progress=progress)
+    await safe_edit(msg, "✅ Soo dejinta way dhammaatay. Diyaar u ah upload-ka OK.ru...")
+
+
 # ----------------------------------------------------------------------
 # UPLOAD (local file -> OK.ru) WITH PROGRESS + RETURN VIDEO LINK
 # ----------------------------------------------------------------------
-async def poll_upload_progress(page, msg, stop_event, max_seconds=1200):
+async def poll_upload_progress(page, msg, stop_event, max_seconds=UPLOAD_MAX_WAIT_SECONDS):
     """
     Best-effort progress poller. OK.ru's upload UI shows a progress
     indicator while the file is uploading/processing. Selectors here are
@@ -130,7 +187,6 @@ async def poll_upload_progress(page, msg, stop_event, max_seconds=1200):
             try:
                 loc = page.locator(sel).first
                 if await loc.count() > 0 and await loc.is_visible():
-                    # Try common attributes/text that carry percentage info
                     aria_val = await loc.get_attribute("aria-valuenow")
                     inner_text = (await loc.inner_text()).strip()
                     if aria_val:
@@ -155,24 +211,70 @@ async def poll_upload_progress(page, msg, stop_event, max_seconds=1200):
         await asyncio.sleep(2)
 
 
-async def get_latest_video_link(page):
-    """
-    Navigate to 'My Videos' and grab the link of the most recently
-    added video (shown first in the grid, as seen in the account).
-    """
-    await page.goto("https://ok.ru/video/myVideo", wait_until="load", timeout=60000)
+# Links that are part of OK.ru's own UI/navigation, never an actual
+# uploaded video - if we ever match one of these, it's the wrong link.
+NON_VIDEO_PATH_KEYWORDS = (
+    "/video/showcase",
+    "/video/manager",
+    "/video/myVideo",
+    "/video/myUnpublished",
+    "/video/edit",
+    "/video/search",
+)
+
+# A real OK.ru video link looks like /video/<numeric-id> (or /video/c<...>)
+VIDEO_ID_PATTERN = re.compile(r"/video/(c?\d{5,})")
+
+# OK.ru puts fresh/large uploads here first, before (or instead of)
+# 'My Videos', until processing/publishing finishes.
+VIDEO_LIST_PAGES = (
+    "https://ok.ru/video/myVideo",
+    "https://ok.ru/video/myUnpublished",
+)
+
+
+async def _find_video_link_on_page(page, url):
+    await page.goto(url, wait_until="load", timeout=60000)
     await asyncio.sleep(3)
 
-    # The first video card/thumbnail link in the "Мои видео" grid
-    first_video_link = page.locator("a[href*='/video/']").first
-    href = await first_video_link.get_attribute("href")
-
-    if href is None:
+    empty_state = page.get_by_text("Upload your first video", exact=False)
+    if await empty_state.count() > 0 and await empty_state.first.is_visible():
         return None
 
-    if href.startswith("http"):
-        return href
-    return f"https://ok.ru{href}"
+    candidates = page.locator("a[href*='/video/']")
+    count = await candidates.count()
+
+    for i in range(count):
+        href = await candidates.nth(i).get_attribute("href")
+        if not href:
+            continue
+        if any(bad in href for bad in NON_VIDEO_PATH_KEYWORDS):
+            continue
+        if VIDEO_ID_PATTERN.search(href):
+            return href if href.startswith("http") else f"https://ok.ru{href}"
+
+    return None
+
+
+async def wait_for_video_link(page, msg, max_seconds=UPLOAD_MAX_WAIT_SECONDS, poll_every=10):
+    """
+    Poll both 'My Videos' and 'Unpublished' until the just-uploaded
+    video shows up (processing can take a while for larger files),
+    then return its real link.
+    """
+    start = time.time()
+
+    while time.time() - start < max_seconds:
+        for list_url in VIDEO_LIST_PAGES:
+            found = await _find_video_link_on_page(page, list_url)
+            if found:
+                return found
+
+        elapsed = int(time.time() - start)
+        await safe_edit(msg, f"⏳ Muqaalka wali waa la processing gareynayaa... ({elapsed}s)")
+        await asyncio.sleep(poll_every)
+
+    return None
 
 
 async def upload_to_ok(update, video_path, msg):
@@ -204,22 +306,18 @@ async def upload_to_ok(update, video_path, msg):
             file_chooser = await fc_info.value
             await file_chooser.set_files(video_path)
 
-            # Start live progress polling in the background
             progress_task = asyncio.create_task(
                 poll_upload_progress(page, msg, stop_event)
             )
 
-            # Give OK.ru time to actually upload + process the file.
-            # We still wait a fixed ceiling as a safety net in case the
-            # progress indicator never resolves to a clear "done" state.
             await asyncio.sleep(60)
 
             stop_event.set()
             if progress_task:
                 await progress_task
 
-            await safe_edit(msg, "🔗 Ka soo qaadaya link-ga muqaalka cusub...")
-            video_link = await get_latest_video_link(page)
+            await safe_edit(msg, "🔗 Sugaya ilaa muqaalka la processing gareeyo oo link-ga la helo...")
+            video_link = await wait_for_video_link(page, msg)
             return True, video_link
 
         except Exception as e:
@@ -227,13 +325,8 @@ async def upload_to_ok(update, video_path, msg):
             if progress_task:
                 await progress_task
 
-            # Always surface the REAL error first, before attempting
-            # anything else that could itself fail (e.g. a closed page).
             await safe_edit(msg, f"❌ Qalad: {e}")
 
-            # Best-effort screenshot - if the page/browser already
-            # crashed or closed, this will fail too, but we don't let
-            # that mask the original error above.
             try:
                 if not page.is_closed():
                     await page.screenshot(path="debug.png")
@@ -257,9 +350,16 @@ async def upload_to_ok(update, video_path, msg):
 # ----------------------------------------------------------------------
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a welcome message when the user sends /start."""
+    large_file_note = (
+        "✅ Faylal waaweyn (>20MB) waa la taageerayaa toos ah.\n\n"
+        if LARGE_FILE_MODE else
+        "⚠️ Faylal ka weyn 20MB ee toos loo diro Telegram lagama aqbali karo "
+        "(u dir link halkii).\n\n"
+    )
     welcome_text = (
         "👋 Salaan! Waxaan ahay OK.ru Upload Bot.\n\n"
         "Waxaan kuu upload gareyn karaa muqaallo si toos ah OK.ru account-kaaga.\n\n"
+        f"{large_file_note}"
         "📌 Sida loo isticmaalo:\n"
         "1️⃣ I soo dir link (URL) muqaal ah — waan soo dejin doonaa oo upload gareyn doonaa.\n"
         "2️⃣ Ama i soo dir muqaal toos ah (video file) — waan qaadan doonaa oo upload gareyn doonaa.\n\n"
@@ -291,7 +391,7 @@ async def handle_link_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await safe_edit(
                     msg,
                     "✅ Guul! Muqaalkii waa la upload gareeyay.\n"
-                    "(Lama helin link-ga - fadlan hubi 'My Videos' ee OK.ru)"
+                    "(Lama helin link-ga - fadlan hubi 'My Videos'/'Unpublished' ee OK.ru)"
                 )
     except Exception as e:
         await safe_edit(msg, f"❌ Qalad: {str(e)}")
@@ -306,15 +406,34 @@ async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if tg_file is None:
         return
 
-    msg = await update.message.reply_text("⏳ Soo dejinta muqaalka ee Telegram...")
     file_path = f"video_{update.message.message_id}.mp4"
 
+    # Bot API download cap is 20MB. Route large files through the
+    # Pyrogram user session instead, if it's configured.
+    file_size = tg_file.file_size or 0
+    twenty_mb = 20 * 1024 * 1024
+
+    if file_size > twenty_mb and not LARGE_FILE_MODE:
+        await update.message.reply_text(
+            "⚠️ Faylkani wuu ka weynyahay 20MB oo Telegram Bot API si toos "
+            "ah uma soo dejin karo.\n\n"
+            "Fadlan i soo dir link (URL) muqaalka halkii aad u soo diri lahayd "
+            "file-ka toos ah, ama waydii admin-ka bot-ka inuu dejiyo "
+            "'large file mode' (TELEGRAM_API_ID / API_HASH / SESSION_STRING)."
+        )
+        return
+
+    msg = await update.message.reply_text("⏳ Soo dejinta muqaalka ee Telegram...")
+
     try:
-        # Telegram Bot API has a 20MB download limit for regular bots.
-        # For bigger files you need a local Bot API server (see chat notes).
-        new_file = await context.bot.get_file(tg_file.file_id)
-        await new_file.download_to_drive(file_path)
-        await safe_edit(msg, "✅ Soo dejinta way dhammaatay. Diyaar u ah upload-ka OK.ru...")
+        if file_size > twenty_mb:
+            await download_telegram_file_with_progress(
+                update.effective_chat.id, update.message.message_id, file_path, msg
+            )
+        else:
+            new_file = await context.bot.get_file(tg_file.file_id)
+            await new_file.download_to_drive(file_path)
+            await safe_edit(msg, "✅ Soo dejinta way dhammaatay. Diyaar u ah upload-ka OK.ru...")
 
         success, video_link = await upload_to_ok(update, file_path, msg)
         if success:
@@ -327,7 +446,7 @@ async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await safe_edit(
                     msg,
                     "✅ Guul! Muqaalkii waa la upload gareeyay.\n"
-                    "(Lama helin link-ga - fadlan hubi 'My Videos' ee OK.ru)"
+                    "(Lama helin link-ga - fadlan hubi 'My Videos'/'Unpublished' ee OK.ru)"
                 )
     except Exception as e:
         await safe_edit(msg, f"❌ Qalad: {str(e)}")
@@ -336,13 +455,43 @@ async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYP
             os.remove(file_path)
 
 
-def main():
+# ----------------------------------------------------------------------
+# ENTRYPOINT
+# ----------------------------------------------------------------------
+async def main_async():
     threading.Thread(target=run_health_server, daemon=True).start()
+
+    if LARGE_FILE_MODE:
+        await pyro_client.start()
+        print("✅ Large-file mode (Pyrogram) is ACTIVE.")
+    else:
+        print("⚠️ Large-file mode is OFF - set TELEGRAM_API_ID, TELEGRAM_API_HASH, "
+              "and TELEGRAM_SESSION_STRING to enable >20MB direct uploads.")
+
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link_message))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video_message))
-    app.run_polling()
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    try:
+        # Keep running until interrupted
+        stop_signal = asyncio.Event()
+        await stop_signal.wait()
+    finally:
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+        if LARGE_FILE_MODE:
+            await pyro_client.stop()
+
+
+def main():
+    asyncio.run(main_async())
+
 
 if __name__ == "__main__":
     main()
