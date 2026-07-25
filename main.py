@@ -16,28 +16,25 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"OK.ru Bot is Running")
+        self.wfile.write(b"Bot is Running")
 
 def run_health_server():
     server = HTTPServer(('0.0.0.0', 8000), HealthCheckHandler)
     server.serve_forever()
 
-# SHAQADAN AYAA SAXAYSA COOKIES-KA QALADKA AH
 def fix_cookies(cookies_list):
     valid_samesite = ["Strict", "Lax", "None"]
     for cookie in cookies_list:
         if 'sameSite' in cookie:
-            # Haddii ay tahay 'no_restriction' u beddel 'None'
             if cookie['sameSite'] == "no_restriction" or cookie['sameSite'] not in valid_samesite:
                 cookie['sameSite'] = "None"
     return cookies_list
 
-async def upload_to_ok(video_path, title):
+async def upload_to_ok(update, video_path):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(viewport={'width': 1280, 'height': 800})
+        context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         
-        # Soo qaado cookies-ka oo sax
         raw_cookies = json.loads(OK_COOKIES_JSON)
         clean_cookies = fix_cookies(raw_cookies)
         await context.add_cookies(clean_cookies)
@@ -45,24 +42,25 @@ async def upload_to_ok(video_path, title):
         page = await context.new_page()
 
         try:
-            print("Gelaya OK.ru adoo isticmaalaya Cookies saxan...")
+            print("Tagaya OK.ru...")
             await page.goto("https://ok.ru/video/upload", wait_until="domcontentloaded", timeout=60000)
             
             # Hubi haddii uu jiro batoonka upload-ka
-            await page.wait_for_selector('div.it_i.upload-video_it', timeout=60000)
-            
-            async with page.expect_file_chooser() as fc_info:
-                await page.click('div.it_i.upload-video_it')
-            
-            file_chooser = await fc_info.value
-            await file_chooser.set_files(video_path)
-            
-            print("Faylka waa la gelinayaa, sug 30 ilbiriqsi...")
-            await asyncio.sleep(30) 
-            print("✅ Upload Successful!")
+            try:
+                await page.wait_for_selector('div.it_i.upload-video_it', timeout=20000)
+                async with page.expect_file_chooser() as fc_info:
+                    await page.click('div.it_i.upload-video_it')
+                file_chooser = await fc_info.value
+                await file_chooser.set_files(video_path)
+                await asyncio.sleep(20)
+                return True
+            except:
+                # Haddii uu waayo batoonka, sawir ka qaad bogga si aan u aragno waxa ku yaal
+                await page.screenshot(path="error_screen.png")
+                await update.message.reply_photo(photo=open("error_screen.png", 'rb'), caption="❌ Batoonka upload-ka waa la waayay. Sawirkan eeg si aad u aragto waxa ka muuqda Bot-ka.")
+                return False
 
         except Exception as e:
-            print(f"❌ Error: {e}")
             raise e
         finally:
             await browser.close()
@@ -80,9 +78,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for chunk in r.iter_content(chunk_size=1024*1024):
                 f.write(chunk)
         
-        await msg.edit_text("🚀 Waxaa bilaawday Upload-ka OK.ru. Fadlan sug...")
-        await upload_to_ok(file_path, "Muuqaal Cusub")
-        await msg.edit_text("✅ Guul! Muqaalkii waa la upload gareeyay.")
+        await msg.edit_text("🚀 Upload-ka ayaa bilaawday...")
+        success = await upload_to_ok(update, file_path)
+        if success:
+            await msg.edit_text("✅ Guul! Muqaalkii waa la upload gareeyay.")
     except Exception as e:
         await msg.edit_text(f"❌ Khalad: {str(e)}")
     finally:
