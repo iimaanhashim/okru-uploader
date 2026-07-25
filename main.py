@@ -9,44 +9,57 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 # SETTINGS
-OK_COOKIES_JSON = os.getenv("OK_COOKIES") # Cookies-ka JSON-ka ah
+OK_COOKIES_JSON = os.getenv("OK_COOKIES")
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"OK.ru Bot with Cookies is Running")
+        self.wfile.write(b"OK.ru Bot is Running")
 
 def run_health_server():
     server = HTTPServer(('0.0.0.0', 8000), HealthCheckHandler)
     server.serve_forever()
+
+# SHAQADAN AYAA SAXAYSA COOKIES-KA QALADKA AH
+def fix_cookies(cookies_list):
+    valid_samesite = ["Strict", "Lax", "None"]
+    for cookie in cookies_list:
+        if 'sameSite' in cookie:
+            # Haddii ay tahay 'no_restriction' u beddel 'None'
+            if cookie['sameSite'] == "no_restriction" or cookie['sameSite'] not in valid_samesite:
+                cookie['sameSite'] = "None"
+    return cookies_list
 
 async def upload_to_ok(video_path, title):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={'width': 1280, 'height': 800})
         
-        # 1. Halkan waxaan ku dhisaynaa Session-ka adoo isticmaalaya Cookies
-        cookies = json.loads(OK_COOKIES_JSON)
-        await context.add_cookies(cookies)
+        # Soo qaado cookies-ka oo sax
+        raw_cookies = json.loads(OK_COOKIES_JSON)
+        clean_cookies = fix_cookies(raw_cookies)
+        await context.add_cookies(clean_cookies)
         
         page = await context.new_page()
 
         try:
-            print("Isagoo isticmaalaya Cookies ayuu gelayaa OK.ru...")
-            await page.goto("https://ok.ru/video/upload", wait_until="networkidle")
+            print("Gelaya OK.ru adoo isticmaalaya Cookies saxan...")
+            await page.goto("https://ok.ru/video/upload", wait_until="domcontentloaded", timeout=60000)
             
-            # Haddii cookies-ku shaqeeyaan, halkan wuxuu toos u arki doonaa batoonka upload-ka
-            print("Gelinaya muqaalka...")
+            # Hubi haddii uu jiro batoonka upload-ka
+            await page.wait_for_selector('div.it_i.upload-video_it', timeout=60000)
+            
             async with page.expect_file_chooser() as fc_info:
                 await page.click('div.it_i.upload-video_it')
             
             file_chooser = await fc_info.value
             await file_chooser.set_files(video_path)
             
-            await asyncio.sleep(15) 
-            print("✅ Upload Successful via Cookies!")
+            print("Faylka waa la gelinayaa, sug 30 ilbiriqsi...")
+            await asyncio.sleep(30) 
+            print("✅ Upload Successful!")
 
         except Exception as e:
             print(f"❌ Error: {e}")
@@ -67,7 +80,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for chunk in r.iter_content(chunk_size=1024*1024):
                 f.write(chunk)
         
-        await msg.edit_text("🚀 Waxaa bilaawday Upload-ka OK.ru (Cookies Mode)...")
+        await msg.edit_text("🚀 Waxaa bilaawday Upload-ka OK.ru. Fadlan sug...")
         await upload_to_ok(file_path, "Muuqaal Cusub")
         await msg.edit_text("✅ Guul! Muqaalkii waa la upload gareeyay.")
     except Exception as e:
