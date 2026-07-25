@@ -1,6 +1,7 @@
 import os
 import asyncio
 import requests
+import json
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from playwright.async_api import async_playwright
@@ -8,77 +9,57 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 # SETTINGS
-RUMBLE_EMAIL = os.getenv("RUMBLE_EMAIL")
-RUMBLE_PASS = os.getenv("RUMBLE_PASS")
+OK_COOKIES_JSON = os.getenv("OK_COOKIES") # Cookies-ka JSON-ka ah
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is Running")
+        self.wfile.write(b"OK.ru Bot with Cookies is Running")
 
 def run_health_server():
     server = HTTPServer(('0.0.0.0', 8000), HealthCheckHandler)
     server.serve_forever()
 
-async def upload_to_rumble(video_path, title):
+async def upload_to_ok(video_path, title):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        # Context leh User-Agent aad u dhab ah
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+        context = await browser.new_context(viewport={'width': 1280, 'height': 800})
+        
+        # 1. Halkan waxaan ku dhisaynaa Session-ka adoo isticmaalaya Cookies
+        cookies = json.loads(OK_COOKIES_JSON)
+        await context.add_cookies(cookies)
+        
         page = await context.new_page()
 
         try:
-            print("Isku dayaya Login-ka...")
-            # Toos u tag bogga login-ka ee aad sawirka iiga soo dirtay
-            login_url = "https://auth.rumble.com/login?redirect_uri=https%3A%2F%2Frumble.com%2Fupload.php"
-            await page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
+            print("Isagoo isticmaalaya Cookies ayuu gelayaa OK.ru...")
+            await page.goto("https://ok.ru/video/upload", wait_until="networkidle")
             
-            # Buuxi Email/Username
-            await page.wait_for_selector('input[name="username"]', timeout=30000)
-            await page.fill('input[name="username"]', RUMBLE_EMAIL)
+            # Haddii cookies-ku shaqeeyaan, halkan wuxuu toos u arki doonaa batoonka upload-ka
+            print("Gelinaya muqaalka...")
+            async with page.expect_file_chooser() as fc_info:
+                await page.click('div.it_i.upload-video_it')
             
-            # Buuxi Password
-            await page.fill('input[name="password"]', RUMBLE_PASS)
+            file_chooser = await fc_info.value
+            await file_chooser.set_files(video_path)
             
-            # Guji Sign In
-            await page.click('button[type="submit"]')
-            print("Login la gujiyay...")
-
-            # Sug inta uu bogga upload-ka ka furmayo (Kaliya sug batoonka upload-ka)
-            await page.wait_for_selector('input[type="file"]', timeout=60000)
-            print("Hadda waxaan joognaa bogga Upload-ka!")
-
-            # Geli Muqaalka
-            await page.set_input_files('input[type="file"]', video_path)
-            
-            # Buuxi Title (Sug inta sanduuqu ka soo muuqanayo)
-            await page.wait_for_selector('input[name="title"]', timeout=30000)
-            await page.fill('input[name="title"]', title)
-            await page.fill('textarea[name="description"]', "Uploaded via Telegram Automation")
-            
-            # Sug 5 ilbiriqsi ka dibna guji Upload
-            await asyncio.sleep(5)
-            await page.locator('button:has-text("Upload")').first.click()
-            print("Upload-ka waa la diray!")
-            await asyncio.sleep(5)
+            await asyncio.sleep(15) 
+            print("✅ Upload Successful via Cookies!")
 
         except Exception as e:
-            print(f"❌ Qalad: {e}")
+            print(f"❌ Error: {e}")
             raise e
         finally:
             await browser.close()
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
-    if not url.startswith("http"):
-        return
+    if not url.startswith("http"): return
 
-    msg = await update.message.reply_text("⏳ Server-ka ayaa soo dejinaya muqaalka...")
-    file_path = "video_temp.mp4"
+    msg = await update.message.reply_text("⏳ Muqaalka waa la soo dejinayaa...")
+    file_path = f"video_{update.message.message_id}.mp4"
     
     try:
         r = requests.get(url, stream=True)
@@ -86,15 +67,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for chunk in r.iter_content(chunk_size=1024*1024):
                 f.write(chunk)
         
-        await msg.edit_text("🚀 Waxaa bilaawday Upload-ka Rumble (Automation)...")
-        await upload_to_rumble(file_path, "Muuqaal Cusub")
+        await msg.edit_text("🚀 Waxaa bilaawday Upload-ka OK.ru (Cookies Mode)...")
+        await upload_to_ok(file_path, "Muuqaal Cusub")
         await msg.edit_text("✅ Guul! Muqaalkii waa la upload gareeyay.")
-    
     except Exception as e:
         await msg.edit_text(f"❌ Khalad: {str(e)}")
     finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        if os.path.exists(file_path): os.remove(file_path)
 
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
