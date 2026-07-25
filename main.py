@@ -153,6 +153,24 @@ async def download_telegram_file_with_progress(chat_id, message_id, file_path, m
             )
 
     tg_message = await pyro_client.get_messages(chat_id, message_ids=message_id)
+
+    has_media = any([
+        tg_message.video,
+        tg_message.document,
+        tg_message.animation,
+        tg_message.video_note,
+    ])
+
+    if not has_media:
+        # Give a clearer, more actionable error than the raw Pyrogram one.
+        raise Exception(
+            "Fariintan lama soo dejin karo (session-ka userbot-ku ma arko "
+            "file dhab ah). Marka inta badan waxaa sababa in fariinta laga "
+            "soo diray (forward) bot kale oo 'protected content' dhigay. "
+            "Fadlan soo dejiso file-ka gudaha device-kaaga, kadibna u soo "
+            "dir bot-kan sida upload cusub (ma aha forward)."
+        )
+
     await pyro_client.download_media(tg_message, file_name=file_path, progress=progress)
     await safe_edit(msg, "✅ Soo dejinta way dhammaatay. Diyaar u ah upload-ka OK.ru...")
 
@@ -233,14 +251,12 @@ VIDEO_LIST_PAGES = (
 )
 
 
-async def _find_video_link_on_page(page, url):
+async def _get_video_ids_on_page(page, url):
+    """Return the set of real OK.ru video IDs currently listed on a page."""
     await page.goto(url, wait_until="load", timeout=60000)
     await asyncio.sleep(3)
 
-    empty_state = page.get_by_text("Upload your first video", exact=False)
-    if await empty_state.count() > 0 and await empty_state.first.is_visible():
-        return None
-
+    ids = set()
     candidates = page.locator("a[href*='/video/']")
     count = await candidates.count()
 
@@ -250,25 +266,42 @@ async def _find_video_link_on_page(page, url):
             continue
         if any(bad in href for bad in NON_VIDEO_PATH_KEYWORDS):
             continue
-        if VIDEO_ID_PATTERN.search(href):
-            return href if href.startswith("http") else f"https://ok.ru{href}"
+        match = VIDEO_ID_PATTERN.search(href)
+        if match:
+            ids.add(match.group(1))
 
-    return None
+    return ids
 
 
-async def wait_for_video_link(page, msg, max_seconds=UPLOAD_MAX_WAIT_SECONDS, poll_every=10):
+async def get_existing_video_ids(page):
     """
-    Poll both 'My Videos' and 'Unpublished' until the just-uploaded
-    video shows up (processing can take a while for larger files),
-    then return its real link.
+    Snapshot of every video ID already present (in both 'My Videos' and
+    'Unpublished') BEFORE a new upload starts. Used so we only ever
+    report a genuinely NEW video afterward, never a stale/old one.
+    """
+    all_ids = set()
+    for list_url in VIDEO_LIST_PAGES:
+        ids = await _get_video_ids_on_page(page, list_url)
+        all_ids |= ids
+    return all_ids
+
+
+async def wait_for_new_video_link(page, msg, existing_ids, max_seconds=UPLOAD_MAX_WAIT_SECONDS, poll_every=10):
+    """
+    Poll both 'My Videos' and 'Unpublished' until a video ID shows up
+    that WASN'T in the pre-upload baseline (existing_ids). This is the
+    only reliable way to avoid re-reporting an old/stale video when the
+    new upload is still processing or has silently failed.
     """
     start = time.time()
 
     while time.time() - start < max_seconds:
         for list_url in VIDEO_LIST_PAGES:
-            found = await _find_video_link_on_page(page, list_url)
-            if found:
-                return found
+            ids = await _get_video_ids_on_page(page, list_url)
+            new_ids = ids - existing_ids
+            if new_ids:
+                new_id = next(iter(new_ids))
+                return f"https://ok.ru/video/{new_id}"
 
         elapsed = int(time.time() - start)
         await safe_edit(msg, f"⏳ Muqaalka wali waa la processing gareynayaa... ({elapsed}s)")
@@ -294,6 +327,10 @@ async def upload_to_ok(update, video_path, msg):
         progress_task = None
 
         try:
+            print("Diiwaan gelinta muqaallada hore u jira...")
+            existing_ids = await get_existing_video_ids(page)
+            print(f"Muqaallo hore u jira: {len(existing_ids)}")
+
             print("Tagaya Video Manager...")
             await page.goto("https://ok.ru/video/manager", wait_until="load", timeout=60000)
             await asyncio.sleep(5)
@@ -317,7 +354,7 @@ async def upload_to_ok(update, video_path, msg):
                 await progress_task
 
             await safe_edit(msg, "🔗 Sugaya ilaa muqaalka la processing gareeyo oo link-ga la helo...")
-            video_link = await wait_for_video_link(page, msg)
+            video_link = await wait_for_new_video_link(page, msg, existing_ids)
             return True, video_link
 
         except Exception as e:
@@ -427,8 +464,13 @@ async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         if file_size > twenty_mb:
+            # IMPORTANT: from the userbot's own perspective, this private
+            # chat is identified by the BOT's id/username - not the
+            # human user's own id (which is what the Bot API's
+            # effective_chat.id gives us in a private chat).
+            bot_username = context.bot.username
             await download_telegram_file_with_progress(
-                update.effective_chat.id, update.message.message_id, file_path, msg
+                bot_username, update.message.message_id, file_path, msg
             )
         else:
             new_file = await context.bot.get_file(tg_file.file_id)
