@@ -16,7 +16,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"OK.ru Bot is Running")
+        self.wfile.write(b"OK.ru Universal Bot is Running")
 
 def run_health_server():
     server = HTTPServer(('0.0.0.0', 8000), HealthCheckHandler)
@@ -49,27 +49,34 @@ async def upload_to_ok(update, video_path):
             await page.goto("https://ok.ru/video/manager", wait_until="load", timeout=60000)
             await asyncio.sleep(5)
 
-            # 1. Guji batoonka "Add" ee kore
-            print("Gujinaya batoonka Add...")
-            await page.click('header .widget_cnt button.button-pro, .alc .widget_cnt .button-pro', timeout=30000)
-            await asyncio.sleep(2)
+            # 1. Isku day batoonka weyn ee dhexda (Empty State)
+            big_button = page.locator('div.it_i.upload-video_it, .upload-video_it')
+            if await big_button.is_visible():
+                print("Waxaan helay batoonka weyn ee dhexda...")
+                async with page.expect_file_chooser() as fc_info:
+                    await big_button.click()
+                file_chooser = await fc_info.value
+                await file_chooser.set_files(video_path)
+            
+            # 2. Haddii kale isku day batoonka "Add" ee kore
+            else:
+                print("Batoonka dhexda lama arko, isku dayaya batoonka 'Add'...")
+                add_button = page.locator('button:has-text("Add"), .button-pro, [data-l="t,addVideo"]')
+                await add_button.first.click(timeout=30000)
+                await asyncio.sleep(2)
+                
+                async with page.expect_file_chooser() as fc_info:
+                    await page.click('text="Upload file"', timeout=20000)
+                file_chooser = await fc_info.value
+                await file_chooser.set_files(video_path)
 
-            # 2. Halkan ayaan ka dooranaynaa "Upload file" ee menu-ka dhexdiisa
-            print("Dooranaya Upload file...")
-            async with page.expect_file_chooser() as fc_info:
-                # Waxaan raadinaynaa qoraalka 'Upload file' ama icon-ka u dhow
-                await page.click('text="Upload file"', timeout=30000)
-            
-            file_chooser = await fc_info.value
-            await file_chooser.set_files(video_path)
-            
-            print("Faylka waa la gelinayaa. Fadlan sug 60 ilbiriqsi...")
+            print("✅ Upload-ku waa bilaawday. Sug 60 ilbiriqsi...")
             await asyncio.sleep(60) 
             return True
 
         except Exception as e:
-            await page.screenshot(path="final_debug.png")
-            await update.message.reply_photo(photo=open("final_debug.png", 'rb'), caption=f"❌ Qalad ayaa dhacay: {e}")
+            await page.screenshot(path="debug.png")
+            await update.message.reply_photo(photo=open("debug.png", 'rb'), caption=f"❌ Qalad: {e}")
             return False
         finally:
             await browser.close()
@@ -90,7 +97,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("🚀 Upload-ka OK.ru ayaa bilaawday...")
         success = await upload_to_ok(update, file_path)
         if success:
-            await msg.edit_text("✅ Guul! Muqaalkii waa la upload gareeyay. Ka hubi qaybta 'My Videos' ee OK.ru-gaaga.")
+            await msg.edit_text("✅ Guul! Muqaalkii waa la upload gareeyay.")
     except Exception as e:
         await msg.edit_text(f"❌ Qalad: {str(e)}")
     finally:
