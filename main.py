@@ -226,11 +226,30 @@ async def upload_to_ok(update, video_path, msg):
             stop_event.set()
             if progress_task:
                 await progress_task
-            await page.screenshot(path="debug.png")
-            await update.message.reply_photo(photo=open("debug.png", 'rb'), caption=f"❌ Qalad: {e}")
+
+            # Always surface the REAL error first, before attempting
+            # anything else that could itself fail (e.g. a closed page).
+            await safe_edit(msg, f"❌ Qalad: {e}")
+
+            # Best-effort screenshot - if the page/browser already
+            # crashed or closed, this will fail too, but we don't let
+            # that mask the original error above.
+            try:
+                if not page.is_closed():
+                    await page.screenshot(path="debug.png")
+                    await update.message.reply_photo(
+                        photo=open("debug.png", 'rb'),
+                        caption="📸 Sawirka bogga wakhtiga khaladku dhacay"
+                    )
+            except Exception as screenshot_error:
+                print(f"Screenshot-ka lama qaadi karin: {screenshot_error}")
+
             return False, None
         finally:
-            await browser.close()
+            try:
+                await browser.close()
+            except Exception:
+                pass
 
 
 # ----------------------------------------------------------------------
