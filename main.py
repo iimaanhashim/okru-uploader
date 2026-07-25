@@ -16,7 +16,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"OK.ru Mobile Bot is Running")
+        self.wfile.write(b"OK.ru Universal Bot is Running")
 
 def run_health_server():
     server = HTTPServer(('0.0.0.0', 8000), HealthCheckHandler)
@@ -30,41 +30,38 @@ def fix_cookies(cookies_list):
                 cookie['sameSite'] = "None"
     return cookies_list
 
-async def upload_to_ok_mobile(update, video_path):
+async def upload_to_ok(update, video_path):
     async with async_playwright() as p:
-        # Waxaan iska dhigaynaa iPhone si OK.ru noo oggolaato
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            viewport={'width': 1280, 'height': 800}
         )
-        
+
         raw_cookies = json.loads(OK_COOKIES_JSON)
         clean_cookies = fix_cookies(raw_cookies)
         await context.add_cookies(clean_cookies)
-        
+
         page = await context.new_page()
 
         try:
-            # 1. Tag bogga moobiilka ee Video Upload-ka
-            print("Tagaya m.ok.ru...")
-            await page.goto("https://m.ok.ru/video/upload", wait_until="load", timeout=60000)
+            print("Tagaya Video Manager...")
+            await page.goto("https://ok.ru/video/manager", wait_until="load", timeout=60000)
             await asyncio.sleep(5)
 
-            # 2. Hubi haddii uu Login yahay
-            if "login" in page.url:
-                await page.screenshot(path="login_error.png")
-                await update.message.reply_photo(photo=open("login_error.png", 'rb'), caption="❌ Cookies-kaagu way dhaceen (Expired). Fadlan soo saar Cookies cusub adigoon Logout dhigin.")
-                return False
+            # Bogga /video/manager wuxuu si toos ah u soo bandhigaa
+            # batoonka "Choose a file for upload" - kuma baahnid inaad
+            # marka hore riixdo batoonka "Add" ee kore.
+            upload_btn = page.get_by_text("Choose a file for upload", exact=False)
+            await upload_btn.wait_for(state="visible", timeout=30000)
 
-            # 3. Dooro faylka
-            print("Gelinaya muqaalka...")
             async with page.expect_file_chooser() as fc_info:
-                await page.click('input[type="file"]')
+                await upload_btn.click()
             file_chooser = await fc_info.value
             await file_chooser.set_files(video_path)
-            
-            await asyncio.sleep(10)
-            print("✅ Upload Successful!")
+
+            print("✅ Upload-ku waa bilaawday. Sug 60 ilbiriqsi...")
+            await asyncio.sleep(60)
             return True
 
         except Exception as e:
@@ -76,25 +73,27 @@ async def upload_to_ok_mobile(update, video_path):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
-    if not url.startswith("http"): return
+    if not url.startswith("http"):
+        return
 
-    msg = await update.message.reply_text("⏳ Soo dejinaya muqaalka...")
+    msg = await update.message.reply_text("⏳ Server-ka ayaa soo dejinaya muqaalka...")
     file_path = f"video_{update.message.message_id}.mp4"
-    
+
     try:
         r = requests.get(url, stream=True)
         with open(file_path, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=1024*1024):
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
                 f.write(chunk)
-        
-        await msg.edit_text("🚀 Upload-ka Mobile OK.ru ayaa bilaawday...")
-        success = await upload_to_ok_mobile(update, file_path)
+
+        await msg.edit_text("🚀 Upload-ka OK.ru ayaa bilaawday...")
+        success = await upload_to_ok(update, file_path)
         if success:
             await msg.edit_text("✅ Guul! Muqaalkii waa la upload gareeyay.")
     except Exception as e:
         await msg.edit_text(f"❌ Qalad: {str(e)}")
     finally:
-        if os.path.exists(file_path): os.remove(file_path)
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
