@@ -32,8 +32,12 @@ def fix_cookies(cookies_list):
 
 async def upload_to_ok(update, video_path):
     async with async_playwright() as p:
+        # Launching with more "human" settings
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            viewport={'width': 1366, 'height': 768}
+        )
         
         raw_cookies = json.loads(OK_COOKIES_JSON)
         clean_cookies = fix_cookies(raw_cookies)
@@ -42,26 +46,37 @@ async def upload_to_ok(update, video_path):
         page = await context.new_page()
 
         try:
-            print("Tagaya OK.ru...")
+            # 1. TAG HOME PAGE HORTA (Warm-up)
+            print("Tagaya Home Page...")
+            await page.goto("https://ok.ru/", wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(5) # Sug 5 ilbiriqsi sidii bini-aadan
+
+            # 2. TAG BOGGA UPLOAD-KA
+            print("Hadda tagaya bogga Upload-ka...")
             await page.goto("https://ok.ru/video/upload", wait_until="domcontentloaded", timeout=60000)
-            
-            # Hubi haddii uu jiro batoonka upload-ka
+            await asyncio.sleep(3)
+
+            # Hubi haddii uu jiro batoonka upload-ka ama haddii uu error jiro
             try:
-                await page.wait_for_selector('div.it_i.upload-video_it', timeout=20000)
+                await page.wait_for_selector('div.it_i.upload-video_it', timeout=15000)
                 async with page.expect_file_chooser() as fc_info:
                     await page.click('div.it_i.upload-video_it')
                 file_chooser = await fc_info.value
                 await file_chooser.set_files(video_path)
+                
+                # Sug ilaa uu upload-ku ka bilaabanayo
+                print("Faylka waa la gelinayaa...")
                 await asyncio.sleep(20)
                 return True
             except:
-                # Haddii uu waayo batoonka, sawir ka qaad bogga si aan u aragno waxa ku yaal
-                await page.screenshot(path="error_screen.png")
-                await update.message.reply_photo(photo=open("error_screen.png", 'rb'), caption="❌ Batoonka upload-ka waa la waayay. Sawirkan eeg si aad u aragto waxa ka muuqda Bot-ka.")
+                # Haddii uu waayo, Screenshot qaad mar kale
+                await page.screenshot(path="debug.png")
+                await update.message.reply_photo(photo=open("debug.png", 'rb'), caption="❌ Wali batoonka lama helin. Hubi sawirkan cusub.")
                 return False
 
         except Exception as e:
-            raise e
+            print(f"Error: {e}")
+            return False
         finally:
             await browser.close()
 
@@ -69,7 +84,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     if not url.startswith("http"): return
 
-    msg = await update.message.reply_text("⏳ Muqaalka waa la soo dejinayaa...")
+    msg = await update.message.reply_text("⏳ Server-ka ayaa soo dejinaya muqaalka...")
     file_path = f"video_{update.message.message_id}.mp4"
     
     try:
@@ -78,12 +93,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for chunk in r.iter_content(chunk_size=1024*1024):
                 f.write(chunk)
         
-        await msg.edit_text("🚀 Upload-ka ayaa bilaawday...")
+        await msg.edit_text("🚀 Upload-ka OK.ru ayaa bilaawday...")
         success = await upload_to_ok(update, file_path)
         if success:
             await msg.edit_text("✅ Guul! Muqaalkii waa la upload gareeyay.")
     except Exception as e:
-        await msg.edit_text(f"❌ Khalad: {str(e)}")
+        await msg.edit_text(f"❌ Qalad: {str(e)}")
     finally:
         if os.path.exists(file_path): os.remove(file_path)
 
