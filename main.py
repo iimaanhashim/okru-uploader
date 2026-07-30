@@ -13,16 +13,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # ----------------------------------------------------------------------
 # SETTINGS
 # ----------------------------------------------------------------------
-# Preferred auth method: email/password login, done fresh on every run.
-# This survives password changes automatically (no more re-exporting
-# cookies from a browser every time you change your OK.ru password).
-OK_EMAIL = os.getenv("OK_EMAIL")
-OK_PASSWORD = os.getenv("OK_PASSWORD")
-
-# Legacy fallback: if OK_EMAIL / OK_PASSWORD are not set, the bot will
-# fall back to cookie-based auth (kept only for backwards compatibility).
 OK_COOKIES_JSON = os.getenv("OK_COOKIES")
-
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 # Large files (700MB-1GB+) can take a long time for OK.ru to process
@@ -72,106 +63,6 @@ def fix_cookies(cookies_list):
             if cookie['sameSite'] == "no_restriction" or cookie['sameSite'] not in valid_samesite:
                 cookie['sameSite'] = "None"
     return cookies_list
-
-
-class OkLoginBlockedError(Exception):
-    """Raised when OK.ru shows a CAPTCHA / phone / email verification
-    challenge that Playwright cannot click through automatically. When
-    this happens a human needs to log in manually once from the same
-    server/IP (or solve the challenge), then retry."""
-    pass
-
-
-async def login_to_ok(context, page, msg=None):
-    """
-    Log into OK.ru with OK_EMAIL / OK_PASSWORD, fresh on every call.
-
-    NOTE: OK.ru's markup can change, and selectors here are best-effort
-    (mirrors the defensive multi-selector style used elsewhere in this
-    file, e.g. poll_upload_progress). If login starts failing after an
-    OK.ru redesign, the debug screenshot attached to the Telegram error
-    message is the fastest way to see what changed and update the
-    selectors below.
-    """
-    await page.goto("https://ok.ru/", wait_until="load", timeout=60000)
-    await asyncio.sleep(2)
-
-    # --- Fill the email field ---
-    email_selectors = [
-        "input[name='st.email']",
-        "input#field_email",
-        "input[type='email']",
-        "input[name*='email']",
-    ]
-    email_field = None
-    for sel in email_selectors:
-        loc = page.locator(sel).first
-        if await loc.count() > 0:
-            email_field = loc
-            break
-    if email_field is None:
-        raise Exception("Ma helin field-ka email-ka bogga login-ka OK.ru (selectors-ka waa in la cusboonaysiiyaa).")
-    await email_field.fill(OK_EMAIL)
-
-    # --- Fill the password field ---
-    password_selectors = [
-        "input[name='st.password']",
-        "input#field_password",
-        "input[type='password']",
-    ]
-    password_field = None
-    for sel in password_selectors:
-        loc = page.locator(sel).first
-        if await loc.count() > 0:
-            password_field = loc
-            break
-    if password_field is None:
-        raise Exception("Ma helin field-ka password-ka bogga login-ka OK.ru (selectors-ka waa in la cusboonaysiiyaa).")
-    await password_field.fill(OK_PASSWORD)
-
-    # --- Submit ---
-    submit_selectors = [
-        "input[type='submit']",
-        "button[type='submit']",
-        "button:has-text('Log in')",
-        "button:has-text('Login')",
-    ]
-    submitted = False
-    for sel in submit_selectors:
-        loc = page.locator(sel).first
-        if await loc.count() > 0:
-            await loc.click()
-            submitted = True
-            break
-    if not submitted:
-        await password_field.press("Enter")
-
-    await asyncio.sleep(5)
-
-    # --- Detect CAPTCHA / phone / extra-verification challenges ---
-    challenge_markers = [
-        "captcha",
-        "confirm it's you",
-        "verify your",
-        "enter the code",
-        "phone number",
-        "unusual activity",
-    ]
-    page_text = (await page.content()).lower()
-    if any(marker in page_text for marker in challenge_markers):
-        raise OkLoginBlockedError(
-            "OK.ru wuxuu soo bandhigay xaqiijin dheeraad ah (CAPTCHA/SMS/verification) "
-            "oo bot-ku automatic uma dhaafi karo. Fadlan mar hore gacanta ugu gal "
-            "account-ka isla server/IP-kan (ama isticmaal cookies-kii hore ee shaqeynayay), "
-            "kadibna mar kale isku day."
-        )
-
-    # --- Confirm we actually landed logged-in (not still on login page) ---
-    if "ok.ru/login" in page.url or await page.locator("input[name='st.password']").count() > 0:
-        raise Exception(
-            "Login-ku ma guuleysan - hubi in OK_EMAIL/OK_PASSWORD ay saxan yihiin, "
-            "ama hubi sawirka khaladka ee la soo diray."
-        )
 
 
 async def safe_edit(msg, text):
@@ -427,26 +318,15 @@ async def upload_to_ok(update, video_path, msg):
             viewport={'width': 1280, 'height': 800}
         )
 
+        raw_cookies = json.loads(OK_COOKIES_JSON)
+        clean_cookies = fix_cookies(raw_cookies)
+        await context.add_cookies(clean_cookies)
+
         page = await context.new_page()
         stop_event = asyncio.Event()
         progress_task = None
 
         try:
-            if OK_EMAIL and OK_PASSWORD:
-                await safe_edit(msg, "🔐 Ku gelayaa OK.ru (email/password)...")
-                await login_to_ok(context, page, msg)
-            elif OK_COOKIES_JSON:
-                # Legacy path - only used if OK_EMAIL/OK_PASSWORD aren't set.
-                raw_cookies = json.loads(OK_COOKIES_JSON)
-                clean_cookies = fix_cookies(raw_cookies)
-                await context.add_cookies(clean_cookies)
-                await page.goto("https://ok.ru/", wait_until="load", timeout=60000)
-            else:
-                raise Exception(
-                    "Lama helin xog login ah. Deji OK_EMAIL iyo OK_PASSWORD "
-                    "(ama OK_COOKIES oo ah habka hore)."
-                )
-
             print("Diiwaan gelinta muqaallada hore u jira...")
             existing_ids = await get_existing_video_ids(page)
             print(f"Muqaallo hore u jira: {len(existing_ids)}")
