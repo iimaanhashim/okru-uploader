@@ -1,5 +1,8 @@
 import os
 import re
+import urllib.parse
+from dotenv import load_dotenv
+load_dotenv()
 import time
 import asyncio
 import requests
@@ -63,6 +66,50 @@ def fix_cookies(cookies_list):
             if cookie['sameSite'] == "no_restriction" or cookie['sameSite'] not in valid_samesite:
                 cookie['sameSite'] = "None"
     return cookies_list
+
+
+VALID_VIDEO_EXTENSIONS = (
+    ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".3gp", ".ts"
+)
+
+
+def sanitize_filename(name, fallback):
+    """
+    Clean a filename so it's safe to use on disk while keeping it as close
+    as possible to the original (this is what OK.ru uses as the video's
+    default title, e.g. 'Raja Bhaiya.mp4' instead of 'video_12345.mp4').
+    """
+    if not name:
+        return fallback
+
+    name = urllib.parse.unquote(name)
+    name = os.path.basename(name)
+    # Strip characters that aren't safe on disk / in most filesystems.
+    name = re.sub(r'[\\/:*?"<>|]+', "", name).strip()
+    # Collapse any leftover whitespace runs.
+    name = re.sub(r"\s+", " ", name)
+
+    if not name:
+        return fallback
+
+    root, ext = os.path.splitext(name)
+    if ext.lower() not in VALID_VIDEO_EXTENSIONS:
+        # No/unknown extension - keep the name but force a playable one.
+        name = f"{name}.mp4"
+
+    # Keep filenames from getting unreasonably long.
+    if len(name) > 150:
+        root, ext = os.path.splitext(name)
+        name = root[:150 - len(ext)] + ext
+
+    return name
+
+
+def filename_from_url(url, fallback):
+    """Best-effort extraction of the real file name from a direct video URL."""
+    parsed = urllib.parse.urlparse(url)
+    base = os.path.basename(parsed.path)
+    return sanitize_filename(base, fallback)
 
 
 async def safe_edit(msg, text):
@@ -412,7 +459,12 @@ async def handle_link_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     msg = await update.message.reply_text("⏳ Soo dejinta muqaalka: 0%")
-    file_path = f"video_{update.message.message_id}.mp4"
+    fallback_name = f"video_{update.message.message_id}.mp4"
+    file_name = filename_from_url(url, fallback_name)
+
+    work_dir = f"dl_{update.message.message_id}"
+    os.makedirs(work_dir, exist_ok=True)
+    file_path = os.path.join(work_dir, file_name)
 
     try:
         await download_with_progress(url, file_path, msg)
@@ -435,6 +487,10 @@ async def handle_link_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
+        try:
+            os.rmdir(work_dir)
+        except OSError:
+            pass
 
 
 async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -443,7 +499,13 @@ async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if tg_file is None:
         return
 
-    file_path = f"video_{update.message.message_id}.mp4"
+    fallback_name = f"video_{update.message.message_id}.mp4"
+    original_name = getattr(tg_file, "file_name", None)
+    file_name = sanitize_filename(original_name, fallback_name)
+
+    work_dir = f"dl_{update.message.message_id}"
+    os.makedirs(work_dir, exist_ok=True)
+    file_path = os.path.join(work_dir, file_name)
 
     # Bot API download cap is 20MB. Route large files through the
     # Pyrogram user session instead, if it's configured.
@@ -495,6 +557,10 @@ async def handle_video_message(update: Update, context: ContextTypes.DEFAULT_TYP
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
+        try:
+            os.rmdir(work_dir)
+        except OSError:
+            pass
 
 
 # ----------------------------------------------------------------------
