@@ -1,28 +1,21 @@
-FROM python:3.10-slim
+# 1. Isticmaal image horay loogu soo diyaariyay wax kasta
+FROM mcr.microsoft.com/playwright/python:v1.45.0-jammy
 
-# Deji meesha shaqada
+# 2. Deji meesha shaqada
 WORKDIR /app
 
-# 1. Cusboonaysii nidaamka oo ku rakib agabka aasaasiga ah
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    gnupg \
-    && rm -rf /var/lib/apt/lists/*
-
-# 2. Koobbi garee requirements.txt
+# 3. Koobbi garee requirements.txt oo kaliya marka hore
 COPY requirements.txt .
 
-# 3. Ku rakib packages-ka Python
+# 4. Ku rakib packages-ka Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. Ku rakib Playwright Chromium kaliya
-RUN playwright install chromium
-
-# 5. Ku rakib dependencies-ka muhiimka ah (tani waxay xallineysaa khaladaadka fonts-ka)
-RUN apt-get update && playwright install-deps chromium && rm -rf /var/lib/apt/lists/*
-
-# 6. Koobbi garee files-ka kale ee app-kaaga
+# 5. Koobbi garee dhamaan files-ka kale ee app-kaaga
 COPY . .
 
-# Amarada lagu bilaabayo app-ka
+# 6. Maadaama image-kani horay u lahaa Chromium, uma baahnid inaad mar kale install dhahdo. 
+# Kaliya waxaan hubineynaa inuu diyaar yahay.
+RUN playwright install chromium
+
+# 7. Amarada lagu bilaabayo app-ka
 CMD ["python", "main.py"]
