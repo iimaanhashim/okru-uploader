@@ -1,20 +1,27 @@
-# Isticmaal image ka yar (slim) halkii aad ka isticmaali lahayd kan weyn ee Microsoft
 FROM python:3.10-slim
 
 # Deji meesha shaqada
 WORKDIR /app
 
-# Ku dar files-ka requirements-ka kaliya marka hore si layer-ka loo cache gareeyo
+# 1. Cusboonaysii nidaamka oo ku rakib agabka aasaasiga ah
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Koobbi garee requirements.txt
 COPY requirements.txt .
 
-# Ku rakib packages-ka Python adigoon cache kaydsaneyn
+# 3. Ku rakib packages-ka Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Ku rakib Playwright iyo inta u baahan yahay ee chromium ah
-# Markaad isticmaasho 'install-deps' waxay soo dejineysaa kaliya wixii chromium u baahnaa
-RUN playwright install --with-deps chromium
+# 4. Ku rakib Playwright Chromium kaliya
+RUN playwright install chromium
 
-# Hadda koobbi garee files-ka kale ee app-kaaga
+# 5. Ku rakib dependencies-ka muhiimka ah (tani waxay xallineysaa khaladaadka fonts-ka)
+RUN apt-get update && playwright install-deps chromium && rm -rf /var/lib/apt/lists/*
+
+# 6. Koobbi garee files-ka kale ee app-kaaga
 COPY . .
 
 # Amarada lagu bilaabayo app-ka
